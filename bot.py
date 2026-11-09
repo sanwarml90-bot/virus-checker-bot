@@ -22,6 +22,10 @@ Env vars (no secrets are hardcoded or logged):
   SESSION_STRING                (optional — Pyrogram user session string for the
                                  helper user client; needed only to download
                                  APKs over 20 MB, up to the 300 MB limit)
+  HELPER_USER_ID                (optional — Telegram user id of the helper
+                                 account, default 8657748041 = GHOST; the bot
+                                 forwards >20 MB documents to this account so
+                                 the helper owns the message and can download it)
   VIRUSTOTAL_API_KEY            (optional — skips the VirusTotal step if unset)
   OPENROUTER_API_KEY            (optional — falls back to rule assessment if unset)
   OPENROUTER_MODEL              (optional, default cohere/north-mini-code:free)
@@ -30,8 +34,13 @@ Pyrogram only, built-in app.run() runner. Every external call is wrapped so
 one failing step never kills the whole check. Downloaded APKs are deleted
 after the check. Files up to 20 MB are downloaded by the bot client
 (Telegram Bot API limit); files from 20 MB up to 300 MB are downloaded by
-the helper user client (MTProto) when SESSION_STRING is set. Without the
-helper, files over 20 MB are rejected with a clear message.
+the helper user client (MTProto) when SESSION_STRING is set — the bot first
+forwards the document to the helper account (HELPER_USER_ID) because the
+helper is not a participant in the user<->bot DM and cannot download the
+file by file_id otherwise. Without the helper, files over 20 MB are
+rejected with a clear message. Every download is verified (file exists,
+non-empty, size matches Telegram's file_size) before any analysis runs —
+a failed download is reported as an error, never analysed as an empty file.
 """
 from __future__ import annotations
 
@@ -56,6 +65,10 @@ API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
+# Telegram user id of the helper account (the account behind SESSION_STRING).
+# The bot forwards >20 MB documents to this account so the helper owns the
+# message and can download the file. Default 8657748041 = GHOST.
+HELPER_USER_ID = int(os.environ.get("HELPER_USER_ID", "") or 8657748041)
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "cohere/north-mini-code:free")
@@ -1055,6 +1068,80 @@ async def on_document(client: Client, message: Message):
     await _enqueue_apk(message, doc, filename, file_size, route)
 
 
+class DownloadError(Exception):
+    """Raised when an APK cannot be downloaded or fails verification."""
+
+
+def verify_download(path: str, expected_size: int) -> tuple[bool, str]:
+    """Check a downloaded file before any analysis runs.
+
+    Returns (ok, reason). `reason` is '' when ok. Fails when the file is
+    missing, empty (0 bytes), or its size differs wildly from Telegram's
+    file_size (small ~1% tolerance for rounding). A failed download must
+    never be analysed — an empty file would produce a misleading verdict.
+    """
+    if not os.path.isfile(path):
+        return False, "file download nahi hui (file mili nahi)"
+    size = os.path.getsize(path)
+    if size <= 0:
+        return False, "file 0 bytes aayi (khali download)"
+    if expected_size > 0:
+        tolerance = max(1024, expected_size // 100)  # ~1%
+        if abs(size - expected_size) > tolerance:
+            return False, (
+                f"file adhoori aayi ({format_size(size)} mili, "
+                f"{format_size(expected_size)} expected thi)")
+    return True, ""
+
+
+async def _download_via_helper(message: Message, doc, local_path: str) -> None:
+    """Download a >20 MB APK via the helper user client.
+
+    The helper is NOT a participant in the user<->bot DM, so it cannot
+    download the file by file_id directly — that silently yields 0 bytes.
+    The bot therefore first forwards the document to the helper account
+    (HELPER_USER_ID, i.e. its Saved Messages), so the helper owns the
+    message; then the helper fetches its own copy of the forwarded message
+    and downloads the file from it. The forwarded copy is deleted from the
+    helper's Saved Messages afterwards (best-effort). Raises DownloadError
+    on any failure.
+    """
+    assert user_app is not None
+    # 1. Forward the document to the helper account.
+    try:
+        fwd = await app.forward_messages(
+            HELPER_USER_ID, message.chat.id, message.id)
+    except Exception as exc:  # noqa: BLE001
+        raise DownloadError(
+            f"helper ko file forward nahi ho payi ({exc})") from exc
+    # forward_messages returns one Message for a single id, a list otherwise.
+    if isinstance(fwd, list):
+        fwd = fwd[0] if fwd else None
+    if fwd is None:
+        raise DownloadError(
+            "helper ko file forward nahi ho payi (koi message nahi mila)")
+    fwd_msg_id = fwd.id
+    try:
+        # 2. Helper fetches its own copy of the forwarded message and
+        # downloads the file from it (its own file reference).
+        helper_msg = await user_app.get_messages(HELPER_USER_ID, fwd_msg_id)
+        if isinstance(helper_msg, list):
+            helper_msg = helper_msg[0] if helper_msg else None
+        if helper_msg is None or getattr(helper_msg, "document", None) is None:
+            raise DownloadError("helper ko forwarded file nahi mili")
+        await user_app.download_media(helper_msg, file_name=local_path)
+    except DownloadError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise DownloadError(f"helper se download nahi ho paya ({exc})") from exc
+    finally:
+        # 3. Clean up the forwarded copy from the helper's Saved Messages.
+        try:
+            await user_app.delete_messages(HELPER_USER_ID, fwd_msg_id)
+        except Exception:  # noqa: BLE001 - cleanup must never break the check
+            pass
+
+
 async def _run_single_check(item: dict) -> None:
     """Run the FULL check pipeline for one queued APK and send its report."""
     message: Message = item["message"]
@@ -1076,16 +1163,26 @@ async def _run_single_check(item: dict) -> None:
 
     tmpdir = tempfile.mkdtemp(prefix="apk-check-")
     local_path = os.path.join(tmpdir, filename)
+    expected_size = file_size  # Telegram's file_size — the download must match it
     try:
-        # Download the APK. <= 20 MB: bot client (Bot API). > 20 MB: the
-        # helper user client fetches the same file by file_id (MTProto),
-        # into the same temp dir so the rest of the pipeline is unchanged.
+        # Download the APK. <= 20 MB: bot client (Bot API). > 20 MB: the bot
+        # first forwards the document to the helper account (so the helper
+        # owns the message), then the helper user client downloads it
+        # (MTProto). The downloaded file is verified BEFORE any analysis —
+        # an empty/truncated download is a download error, never a verdict.
         try:
             if route == "user":
                 assert user_app is not None
-                await user_app.download_media(doc.file_id, file_name=local_path)
+                await _download_via_helper(message, doc, local_path)
             else:
                 await message.download(file_name=local_path)
+        except DownloadError as exc:
+            log.warning("APK download failed (%s path): %s", route, exc)
+            await update(0, "fail")
+            await message.reply_text(
+                f"App {seq} ({filename}): download nahi ho paya — {exc}. "
+                "File dobara bhej do. 🙏")
+            return
         except Exception as exc:  # noqa: BLE001 - a failed download is reported, not a crash
             log.warning("APK download failed (%s path): %s", route, exc)
             await update(0, "fail")
@@ -1094,10 +1191,13 @@ async def _run_single_check(item: dict) -> None:
                 "(Badi file ho to helper se download me dikkat aa sakti hai.)"
             )
             return
-        if not os.path.isfile(local_path):
+        ok, reason = verify_download(local_path, expected_size)
+        if not ok:
+            log.warning("APK download verification failed (App %s): %s", seq, reason)
             await update(0, "fail")
             await message.reply_text(
-                f"App {seq} ({filename}): file download nahi ho payi — dobara try karo.")
+                f"App {seq} ({filename}): download nahi ho paya — {reason}. "
+                "File dobara bhej do. 🙏")
             return
         file_size = os.path.getsize(local_path)
 

@@ -56,6 +56,13 @@ behaviour bilkul waisa hi hai. Alag users ki queues alag-alag hoti hain.
   karta hai (Telegram Bot API limit); 20 MB se badi file (300 MB tak) helper
   user client se download hoti hai — uske liye `SESSION_STRING` chahiye.
   Helper set nahi ho to 20 MB se badi file ka check nahi hoga.
+- **Download verification:** har download ke baad bot check karta hai ki
+  file mili, khali (0 bytes) to nahi hai, aur size Telegram ke file_size se
+  match karta hai ya nahi. Agar download fail ho (0 bytes / adhoori file)
+  to bot us APK ka check **nahi** karta — uski jagah saaf Hinglish error
+  bhejta hai ("download nahi ho paya — file 0 bytes aayi, dobara bhej do")
+  aur batch me agle APK pe badh jata hai. Khali file pe kabhi verdict
+  nahi banta.
 - Sirf `.apk` files check hoti hain — dusri file bhejoge to bot mana kar dega.
 - Bot sirf private chat (DM) me kaam karta hai, groups me nahi.
 
@@ -85,6 +92,7 @@ python bot.py
 | `API_ID` | ✅ Yes | my.telegram.org se API ID |
 | `API_HASH` | ✅ Yes | my.telegram.org se API Hash |
 | `SESSION_STRING` | ❌ Optional | Pyrogram user session string (helper) — sirf 20 MB se badi APK (300 MB tak) download karne ke liye chahiye; nahi ho to 20 MB tak ki files hi check hoti hain |
+| `HELPER_USER_ID` | ❌ Optional | Helper account ka Telegram user id — default **8657748041** (GHOST). Bot 20 MB se badi file ko pehle is account ko forward karta hai, tabhi helper use download kar pata hai. Set na ho to bhi default se kaam chal jata hai, lekin explicitly set karna safe hai |
 | `VIRUSTOTAL_API_KEY` | ❌ Optional | VirusTotal API key (free) — nahi ho to Step 4 skip ho jata hai, baaki steps chalte hain |
 | `OPENROUTER_API_KEY` | ❌ Optional | OpenRouter API key — nahi ho to AI summary/rating ki jagah rule-based summary + rating milta hai |
 | `OPENROUTER_MODEL` | ❌ Optional | Default `cohere/north-mini-code:free` (free tier) |
@@ -99,6 +107,16 @@ se badi APK (300 MB tak) download karne ke liye bot ke saath ek helper
 **user client** (MTProto) chalta hai, jo `SESSION_STRING` env var se login
 hota hai. Ye ek Pyrogram user session string hai — kisi user account ka
 login, bot token nahi.
+
+**Forward-to-helper flow (zaroori samajhna):** helper user↔bot DM ka
+participant nahi hota, isliye wo file ko seedha file_id se download nahi
+kar sakta — aisa karne par download chupchaap 0 bytes ki aati hai. Isliye
+bot 20 MB se badi file ko pehle helper account (`HELPER_USER_ID`, default
+8657748041 = GHOST) ko **forward** karta hai (uske Saved Messages me),
+phir helper apni copy se file download karta hai, aur baad me forwarded
+copy delete kar deta hai. Iske liye helper account ne bot ko `/start` kiya
+hua hona chahiye (warna bot usko forward nahi kar payega aur download
+error aayega).
 
 Session string kaise lein:
 - **Sanji Bot Factory** ke `/userbot` flow se (phone number → OTP → 2FA
