@@ -25,7 +25,10 @@ download ki hui APK file delete kar di jati hai.
 
 ## Limits
 
-- File **20 MB se chhoti** honi chahiye (Telegram Bot API ki download limit).
+- File **300 MB tak** ki ho sakti hai. 20 MB tak ki file bot khud download
+  karta hai (Telegram Bot API limit); 20 MB se badi file (300 MB tak) helper
+  user client se download hoti hai — uske liye `SESSION_STRING` chahiye.
+  Helper set nahi ho to 20 MB se badi file ka check nahi hoga.
 - Sirf `.apk` files check hoti hain — dusri file bhejoge to bot mana kar dega.
 - Bot sirf private chat (DM) me kaam karta hai, groups me nahi.
 
@@ -48,12 +51,35 @@ python bot.py
 | `BOT_TOKEN` | ✅ Yes | BotFather se `/newbot` karke mila token |
 | `API_ID` | ✅ Yes | my.telegram.org se API ID |
 | `API_HASH` | ✅ Yes | my.telegram.org se API Hash |
+| `SESSION_STRING` | ❌ Optional | Pyrogram user session string (helper) — sirf 20 MB se badi APK (300 MB tak) download karne ke liye chahiye; nahi ho to 20 MB tak ki files hi check hoti hain |
 | `VIRUSTOTAL_API_KEY` | ❌ Optional | VirusTotal API key — nahi ho to Step 3 skip ho jata hai, baaki steps chalte hain |
 | `OPENROUTER_API_KEY` | ❌ Optional | OpenRouter API key — nahi ho to AI verdict ki jagah rule-based verdict milta hai |
 | `OPENROUTER_MODEL` | ❌ Optional | Default `cohere/north-mini-code:free` (free tier) |
 
-> ⚠️ Koi bhi token/key code me hardcode mat karo — sirf environment variables
-> me daalo. Bot kabhi koi token ya key log nahi karta.
+> ⚠️ Koi bhi token/key/session code me hardcode mat karo — sirf environment
+> variables me daalo. Bot kabhi koi token, key ya session log nahi karta.
+
+## SESSION_STRING — 20 MB se badi files ke liye
+
+Telegram Bot API se bot sirf 20 MB tak ki file download kar sakta hai. 20 MB
+se badi APK (300 MB tak) download karne ke liye bot ke saath ek helper
+**user client** (MTProto) chalta hai, jo `SESSION_STRING` env var se login
+hota hai. Ye ek Pyrogram user session string hai — kisi user account ka
+login, bot token nahi.
+
+Session string kaise lein:
+- **Sanji Bot Factory** ke `/userbot` flow se (phone number → OTP → 2FA
+  password) — wo session string de deta hai. Use yahan `SESSION_STRING` me
+  daalo.
+- Ya kisi Pyrogram session generator script se (phone + OTP + 2FA).
+
+⚠️ **Ek session, ek service:** ek hi session string ko do live services me
+kabhi share mat karo — is bot ke helper ke liye alag/dedicated session use
+karo, warna session invalid ho jayega (AUTH_KEY_DUPLICATED). Helper ke liye
+ek alag Telegram account use karna sabse safe hai.
+
+`SESSION_STRING` set nahi ho to bot phir bhi chalta hai — bas 20 MB se badi
+file ka check nahi hoga (bot saaf mana kar dega).
 
 ## Free API keys kaise lein
 

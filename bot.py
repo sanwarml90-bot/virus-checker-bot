@@ -10,14 +10,19 @@ like an agent AI and reports a verdict:
 
 Env vars (no secrets are hardcoded or logged):
   BOT_TOKEN, API_ID, API_HASH   (required — BotFather / my.telegram.org)
+  SESSION_STRING                (optional — Pyrogram user session string for the
+                                 helper user client; needed only to download
+                                 APKs over 20 MB, up to the 300 MB limit)
   VIRUSTOTAL_API_KEY            (optional — skips the VirusTotal step if unset)
   OPENROUTER_API_KEY            (optional — falls back to rule verdict if unset)
   OPENROUTER_MODEL              (optional, default cohere/north-mini-code:free)
 
 Pyrogram only, built-in app.run() runner. Every external call is wrapped so
 one failing step never kills the whole check. Downloaded APKs are deleted
-after the check. Telegram Bot API download limit is ~20 MB — bigger files
-are rejected with a clear message.
+after the check. Files up to 20 MB are downloaded by the bot client
+(Telegram Bot API limit); files from 20 MB up to 300 MB are downloaded by
+the helper user client (MTProto) when SESSION_STRING is set. Without the
+helper, files over 20 MB are rejected with a clear message.
 """
 from __future__ import annotations
 
@@ -40,13 +45,15 @@ log = logging.getLogger("virus-checker-bot")
 API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "cohere/north-mini-code:free")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 VIRUSTOTAL_BASE = "https://www.virustotal.com/api/v3"
 
-MAX_APK_BYTES = 20 * 1024 * 1024  # Telegram Bot API download limit (~20 MB)
+MAX_APK_BYTES = 300 * 1024 * 1024  # 300 MB — hard limit for any APK check
+BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Telegram Bot API download limit (~20 MB)
 VT_POLL_ATTEMPTS = 12
 VT_POLL_DELAY_S = 15
 
@@ -103,6 +110,41 @@ PERMISSION_NOTES = {
 VERDICT_EMOJI = {"SAFE": "✅", "SUSPICIOUS": "⚠️", "MALICIOUS": "🚨"}
 
 app = Client("virus-checker-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Helper user client (MTProto) for downloading APKs over the 20 MB Bot API
+# limit, up to the 300 MB cap. Created only when SESSION_STRING is set;
+# otherwise it stays None and large files are rejected with a clear message.
+# It is started in __main__ before app.run() and stopped on shutdown.
+# The session is used by this service only — never share one session string
+# between two live services.
+user_app: Client | None = None
+if SESSION_STRING:
+    user_app = Client(
+        "virus-checker-helper",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+    )
+
+
+def choose_download_path(file_size: int, user_available: bool) -> str:
+    """Pick how an APK of `file_size` bytes should be downloaded.
+
+    Returns one of:
+      "bot"         — <= 20 MB, the bot client downloads it (Bot API).
+      "user"        — > 20 MB and <= 300 MB, the helper user client
+                      downloads it by file_id (MTProto).
+      "too_big"     — > 300 MB, rejected outright.
+      "need_helper" — > 20 MB but no helper user client is configured.
+    Pure function (no I/O) so the routing is easy to test.
+    """
+    if file_size > MAX_APK_BYTES:
+        return "too_big"
+    if file_size <= BOT_DOWNLOAD_LIMIT:
+        return "bot"
+    if user_available:
+        return "user"
+    return "need_helper"
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -376,7 +418,9 @@ async def cmd_start(client: Client, message: Message):
         "2️⃣ Static analysis — permissions (khatarnak wali flag hongi), app details\n"
         "3️⃣ VirusTotal scan — kitne antivirus engines ne flag kiya\n"
         "4️⃣ AI verdict — SAFE, SUSPICIOUS ya MALICIOUS, reasons ke saath\n\n"
-        "⚠️ Limit: file 20 MB se chhoti honi chahiye (Telegram Bot API limit).\n"
+        "⚠️ Limit: file 300 MB tak ki ho sakti hai. 20 MB tak ki file bot khud "
+        "download karta hai; 20 MB se badi file (300 MB tak) helper se download "
+        "hoti hai.\n"
         "Bas APK file bhej do — baaki sab main kar lunga. 😎"
     )
 
@@ -389,7 +433,8 @@ async def cmd_help(client: Client, message: Message):
         "2. Main use download karke 4 steps me check karunga — progress yahin dikhega.\n"
         "3. Aakhir me ek report milegi: verdict, permissions, VirusTotal result aur AI reasons.\n\n"
         "📌 Sirf .apk files check hoti hain — dusri file bhejoge to main mana kar dunga.\n"
-        "📌 File 20 MB se badi ho to bhej nahi paunga (Telegram ki limit hai).\n"
+        "📌 File 300 MB tak ki ho sakti hai. 20 MB se badi file helper se download "
+        "hoti hai — agar helper set nahi hai to 20 MB se badi file ka check nahi hoga.\n"
         "📌 Check ke baad file mere server se delete kar di jati hai."
     )
 
@@ -405,11 +450,21 @@ async def on_document(client: Client, message: Message):
             "APK file bhejte hi main use virus scan karke report dunga."
         )
         return
-    if (doc.file_size or 0) > MAX_APK_BYTES:
+    file_size = doc.file_size or 0
+    route = choose_download_path(file_size, user_app is not None)
+    if route == "too_big":
         await message.reply_text(
-            f"Ye file bahut badi hai ({format_size(doc.file_size or 0)}). "
-            "Telegram Bot API sirf 20 MB tak ki file download kar sakta hai, "
-            "isliye iska check nahi ho payega. Chhoti APK bhejo. 🙏"
+            f"Ye file bahut badi hai ({format_size(file_size)}). "
+            "Main sirf 300 MB tak ki APK check kar sakta hun — "
+            "is se badi file ka check nahi ho payega. 🙏"
+        )
+        return
+    if route == "need_helper":
+        await message.reply_text(
+            f"Ye file {format_size(file_size)} ki hai — 20 MB se badi hai, isliye "
+            "Bot API se download nahi ho sakti. Badi file (300 MB tak) download "
+            "karne ke liye helper set nahi hai, isliye iska check nahi ho payega. "
+            "Chhoti APK bhejo (20 MB tak), ya helper set hone ke baad dobara try karo. 🙏"
         )
         return
 
@@ -426,8 +481,23 @@ async def on_document(client: Client, message: Message):
     tmpdir = tempfile.mkdtemp(prefix="apk-check-")
     local_path = os.path.join(tmpdir, filename)
     try:
-        # Download the APK.
-        await message.download(file_name=local_path)
+        # Download the APK. <= 20 MB: bot client (Bot API). > 20 MB: the
+        # helper user client fetches the same file by file_id (MTProto),
+        # into the same temp dir so the rest of the pipeline is unchanged.
+        try:
+            if route == "user":
+                assert user_app is not None
+                await user_app.download_media(doc.file_id, file_name=local_path)
+            else:
+                await message.download(file_name=local_path)
+        except Exception as exc:  # noqa: BLE001 - a failed download is reported, not a crash
+            log.warning("APK download failed (%s path): %s", route, exc)
+            await update(0, "fail")
+            await message.reply_text(
+                "File download nahi ho payi — dobara try karo. "
+                "(Badi file ho to helper se download me dikkat aa sakti hai.)"
+            )
+            return
         if not os.path.isfile(local_path):
             await update(0, "fail")
             await message.reply_text("File download nahi ho payi — dobara try karo.")
@@ -581,4 +651,22 @@ async def on_group_message(client: Client, message: Message):
 
 if __name__ == "__main__":
     log.info("APK Virus Checker bot starting…")
-    app.run()
+    if user_app is not None:
+        try:
+            user_app.start()
+            log.info("Helper user client started — APKs up to 300 MB can be downloaded.")
+        except Exception as exc:  # noqa: BLE001 - bad/expired session must not kill the bot
+            log.warning(
+                "Helper user client failed to start (%s) — files over 20 MB will "
+                "be rejected until SESSION_STRING is fixed.", exc)
+            user_app = None
+    else:
+        log.info("No SESSION_STRING set — files over 20 MB will be rejected.")
+    try:
+        app.run()
+    finally:
+        if user_app is not None:
+            try:
+                user_app.stop()
+            except Exception:  # noqa: BLE001
+                pass
