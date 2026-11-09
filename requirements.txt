@@ -1,5 +1,6 @@
 pyrogram
 tgcrypto
 androguard
+apkid
 requests
 python-dotenv

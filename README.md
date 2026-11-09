@@ -1,27 +1,54 @@
 # APK Virus Checker Bot 🤖🔍
 
 AI-enhanced Telegram bot — koi bhi `.apk` file bhejo, bot use agent ki tarah
-step by step check karke verdict deta hai: **SAFE, SUSPICIOUS ya MALICIOUS**.
+step by step check karke verdict, summary aur **final risk rating (0-10)**
+deta hai.
 
 ## Ye bot kya karta hai
 
-User APK bhejta hai → bot 4 steps me check karta hai (progress message live update hota hai):
+User APK bhejta hai → bot 5 steps me full check karta hai (progress message
+live update hota hai). Har tool ki report AI ko di jati hai, aur AI poori
+report padh ke summary + final rating deta hai:
 
 1. **File info** — naam, size, MD5 aur SHA256 hash
 2. **Static analysis (androguard)** — package name, app name, version,
    min/target SDK, poori permission list (dangerous permissions flag hoti hain
    jaise `SEND_SMS`, `READ_CONTACTS`, `RECORD_AUDIO`, `CAMERA`,
    `ACCESS_FINE_LOCATION`, `REQUEST_INSTALL_PACKAGES`, `BIND_DEVICE_ADMIN`,
-   `SYSTEM_ALERT_WINDOW`), aur activities/services/receivers/providers ki ginti
-3. **VirusTotal scan** — kitne antivirus engines ne malicious/suspicious bataya,
-   aur kaunse engines ne flag kiya (max 5 naam)
-4. **AI verdict (OpenRouter, free tier)** — file info + permissions + VirusTotal
-   result dekh ke AI step by step sochta hai aur final verdict deta hai,
-   3-5 short reasons ke saath (Hinglish me)
+   `SYSTEM_ALERT_WINDOW`), activities/services/receivers/providers ki ginti,
+   APK ke andar hard-coded **URLs/domains** (shortener, raw IP aur non-HTTPS
+   URLs flag hote hain), **suspicious API calls** (DexClassLoader, reflection,
+   SmsManager, Runtime.exec, crypto) aur flags — debuggable, allowBackup,
+   install-packages, device-admin
+3. **APKiD** — packer, compiler, obfuscator aur anti-analysis tricks
+   (anti-vm / anti-disassembly / anti-debug) detect karta hai. Ye step
+   local hai, koi API key nahi chahiye. Agar APKiD install nahi hai ya fail
+   ho jaye to ye step skip ho jata hai, baaki steps chalte hain.
+4. **VirusTotal scan** — kitne antivirus engines ne malicious/suspicious
+   bataya, aur kaunse engines ne flag kiya (max 5 naam). Free API key se
+   chalta hai; key na ho to ye step skip ho jata hai.
+5. **AI summary + final rating (OpenRouter, free tier)** — upar ke saare
+   tools ki reports ek saath AI ko di jati hain. AI step by step sochta hai
+   aur deta hai: (a) **summary** (4-6 lines, Hinglish), (b) **final rating**
+   — risk score **0-10** (0 = fully safe, 10 = definitely malicious) +
+   risk level **SAFE / LOW / MEDIUM / HIGH / CRITICAL**, (c) 3-5 short
+   reasons. AI key na ho ya call fail ho to rule-based summary + rating
+   milta hai (VirusTotal flags, dangerous permissions, packer, debuggable
+   aadi se score banta hai).
 
-Aakhir me ek clean report milti hai: verdict (emoji ke saath), file info,
-flagged permissions, VirusTotal counts aur AI/rules reasons. Check ke baad
-download ki hui APK file delete kar di jati hai.
+Aakhir me ek clean report milti hai: verdict (emoji ke saath), AI/rule
+summary, har tool ki ek line, aur sabse aakhir me **FINAL RATING (X/10 —
+LEVEL)** bold me. Check ke baad download ki hui APK file delete kar di
+jati hai.
+
+## Batch scan — ek saath kai APK
+
+Ek ke baad ek kai APK bhej do — wo **queue** me lag jayenge aur ek-ek karke
+scan honge. Har APK ki report pe **App 1, App 2, App 3…** likha hota hai,
+taaki pata chale kaunsi report kiski hai. Ek baar me **5 tak APK** queue kar
+sakte ho; 6th bhejo ge to bot mana kar dega jab tak pehli batch khatam na
+ho. Ek hi APK bhejo ge to wo bas **App 1** ki tarah scan hoga — single-APK
+behaviour bilkul waisa hi hai. Alag users ki queues alag-alag hoti hain.
 
 ## Limits
 
@@ -44,6 +71,12 @@ Phir neeche wale environment variables set karo aur bot chalao:
 python bot.py
 ```
 
+> ⚠️ **APKiD note:** APKiD ko RedNaga ke custom yara-python fork ki zaroorat
+> hoti hai (DEX support ke saath). Plain `pip install apkid` kuch systems
+> par fail ho sakta hai. Agar Railway ya local install `apkid` pe atak jaye
+> to `requirements.txt` se `apkid` line hata do — bot phir bhi chalega, bas
+> APKiD step skip ho jayega (baaki saare tools chalte rahenge).
+
 ## Environment variables
 
 | Variable | Required? | Kya hai |
@@ -52,8 +85,8 @@ python bot.py
 | `API_ID` | ✅ Yes | my.telegram.org se API ID |
 | `API_HASH` | ✅ Yes | my.telegram.org se API Hash |
 | `SESSION_STRING` | ❌ Optional | Pyrogram user session string (helper) — sirf 20 MB se badi APK (300 MB tak) download karne ke liye chahiye; nahi ho to 20 MB tak ki files hi check hoti hain |
-| `VIRUSTOTAL_API_KEY` | ❌ Optional | VirusTotal API key — nahi ho to Step 3 skip ho jata hai, baaki steps chalte hain |
-| `OPENROUTER_API_KEY` | ❌ Optional | OpenRouter API key — nahi ho to AI verdict ki jagah rule-based verdict milta hai |
+| `VIRUSTOTAL_API_KEY` | ❌ Optional | VirusTotal API key (free) — nahi ho to Step 4 skip ho jata hai, baaki steps chalte hain |
+| `OPENROUTER_API_KEY` | ❌ Optional | OpenRouter API key — nahi ho to AI summary/rating ki jagah rule-based summary + rating milta hai |
 | `OPENROUTER_MODEL` | ❌ Optional | Default `cohere/north-mini-code:free` (free tier) |
 
 > ⚠️ Koi bhi token/key/session code me hardcode mat karo — sirf environment
@@ -83,19 +116,23 @@ file ka check nahi hoga (bot saaf mana kar dega).
 
 ## Free API keys kaise lein
 
-### VirusTotal (free)
+### VirusTotal (free) — Step 4 ke liye
 1. https://www.virustotal.com/ pe jao aur free account banao (sign up).
 2. Login karke apne profile/avatar → **API key** pe click karo.
 3. Wahan dikh rahi key ko `VIRUSTOTAL_API_KEY` me daalo.
-4. Free key se har minute limited requests milti hain — rate limit (429) aane par
-   bot scan ko "unavailable" batakar aage badh jata hai, crash nahi hota.
+4. **Free tier limits:** 500 requests/day, 4 requests/minute. Rate limit
+   (429) aane par bot scan ko "unavailable" batakar aage badh jata hai,
+   crash nahi hota.
+5. Key na ho to bhi bot chalta hai — tab VirusTotal step skip ho jata hai
+   aur baaki tools (androguard, APKiD, AI) se rating banti hai.
 
-### OpenRouter (free)
+### OpenRouter (free) — AI summary + rating ke liye
 1. https://openrouter.ai/ pe jao aur account banao (Google se bhi sign up hota hai).
 2. **Keys** page pe jao → **Create Key** pe click karo.
 3. Key ko `OPENROUTER_API_KEY` me daalo. Is bot ke liye free model
    `cohere/north-mini-code:free` use hota hai — iska koi charge nahi hai.
-4. Key na ho to bhi bot chalta hai — tab AI ki jagah rule-based verdict milta hai.
+4. Key na ho to bhi bot chalta hai — tab AI ki jagah rule-based summary +
+   rating milta hai.
 
 ## BotFather se bot banana
 
@@ -107,4 +144,5 @@ file ka check nahi hoga (bot saaf mana kar dega).
 
 - `/start` — bot kya karta hai, ye batata hai
 - `/help` — kaise use karein, ye batata hai
-- Bas `.apk` file bhej do — check apne aap shuru ho jata hai
+- Bas `.apk` file bhej do — check apne aap shuru ho jata hai; kai APK bhej
+  do to wo queue me lag kar ek-ek karke scan honge
