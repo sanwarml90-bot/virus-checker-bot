@@ -1173,17 +1173,27 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
     download the file by file_id directly — that silently yields 0 bytes.
     The bot therefore first forwards the document to the helper account
     (HELPER_USER_ID), so the helper owns the message; then the helper
-    fetches its own copy of the forwarded message and downloads the file
-    from it. The forwarded message lives in the helper's DM with the BOT
-    (chat = the bot's user id, fetched at runtime via app.get_me()) —
-    NOT in the helper's Saved Messages, so the helper must fetch and
-    delete it from the bot's chat id. The forwarded copy is deleted from
-    that DM afterwards (best-effort). If the fetch path fails, a fallback
-    downloads directly by the original document's file_id (the forward
-    already gave the helper access to the file); the caller verifies the
-    result, so a bad fallback is caught safely. Raises DownloadError on
-    any failure. Debug logging (INFO) records ids and exception TYPES
-    only — never any token, session string, or API key.
+    finds its own copy of the forwarded message in its DM history with
+    the bot and downloads the file from it. The forwarded message lives
+    in the helper's DM with the BOT (chat = the bot's user id, fetched at
+    runtime via app.get_me()) — NOT in the helper's Saved Messages, so
+    the helper reads that DM's history and deletes the forwarded copy
+    from the bot's chat id afterwards (best-effort).
+
+    Why history instead of get_messages by id: the forward result's id
+    does not reliably point at the forwarded document in the helper's
+    view — proven in production, the forward succeeded but
+    get_messages(bot_user_id, fwd_msg_id) returned a message without a
+    document on all 3 attempts — so the helper now reads recent history
+    from the DM and matches the document by filename + size. If the
+    history path fails, a fallback re-fetches the ORIGINAL message
+    through the bot to get a FRESH file_id (the bot's old file_id
+    reference is expired for the helper's session —
+    FILE_REFERENCE_EXPIRED) and downloads by that. The caller verifies
+    the result, so a bad fallback (0 bytes / wrong size) is caught
+    safely. Raises DownloadError on any failure. Debug logging (INFO)
+    records ids and exception TYPES only — never any token, session
+    string, or API key.
     """
     assert user_app is not None
     # The forwarded message will live in the helper's DM with the bot, so
@@ -1214,55 +1224,80 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
         raise DownloadError(
             "helper ko file forward nahi ho payi (koi message nahi mila)")
     fwd_msg_id = fwd.id
-    log.info(
-        "helper download: forwarded msg id=%s (forward result type=%s)",
-        fwd_msg_id, type(fwd).__name__)
+    # Diagnostic: does the forward result itself carry the document?
+    # (Proven: the forward succeeds, but the helper's get_messages by
+    # this id returned a message WITHOUT a document — log what the
+    # forward result actually holds.)
+    fwd_doc = getattr(fwd, "document", None)
+    if fwd_doc is not None:
+        log.info(
+            "helper download: forwarded msg id=%s has document "
+            "(file_name=%s size=%s)",
+            fwd_msg_id, getattr(fwd_doc, "file_name", None),
+            getattr(fwd_doc, "file_size", None))
+    else:
+        log.info(
+            "helper download: forwarded msg id=%s has NO document",
+            fwd_msg_id)
+    target_name = getattr(doc, "file_name", None)
+    target_size = getattr(doc, "file_size", None)
     try:
-        # 2. Primary path: helper fetches the forwarded message and
-        # downloads the file from it (its own file reference). Retry a
-        # few times — the forwarded message may take a moment to
-        # propagate to the helper's session.
+        # 2. Primary path: helper reads recent history of its DM with
+        # the bot and picks the most recent message whose document
+        # matches the target filename + size; if none matches exactly,
+        # the most recent message with ANY document. Retry a few times
+        # — the forwarded message may take a moment to propagate to
+        # the helper's session. (get_history returns newest first, so
+        # the first match in order is the most recent one.)
         helper_msg = None
         for attempt in range(3):
             try:
-                fetched = await user_app.get_messages(bot_user_id, fwd_msg_id)
-            except Exception as exc:  # noqa: BLE001 - retry on transient fetch errors
+                history = await user_app.get_history(bot_user_id, limit=10)
+            except Exception as exc:  # noqa: BLE001 - retry on transient errors
                 log.info(
-                    "helper download: fetch attempt %d raised %s",
+                    "helper download: history attempt %d raised %s",
                     attempt + 1, type(exc).__name__)
-                fetched = None
-            if isinstance(fetched, list):
-                fetched = fetched[0] if fetched else None
-            if fetched is not None and getattr(fetched, "document", None) is not None:
-                helper_msg = fetched
+                history = None
+            if history:
+                docs = [m for m in history
+                        if getattr(m, "document", None) is not None]
+                if docs:
+                    exact = [m for m in docs
+                             if getattr(m.document, "file_name", None) == target_name
+                             and getattr(m.document, "file_size", None) == target_size]
+                    helper_msg = exact[0] if exact else docs[0]
+                    log.info(
+                        "helper download: history path got the document "
+                        "(file_name=%s size=%s)",
+                        getattr(helper_msg.document, "file_name", None),
+                        getattr(helper_msg.document, "file_size", None))
+                    break
                 log.info(
-                    "helper download: fetch attempt %d got the document",
-                    attempt + 1)
-                break
-            if fetched is None:
-                log.info(
-                    "helper download: fetch attempt %d returned None",
+                    "helper download: history attempt %d returned no document",
                     attempt + 1)
             else:
                 log.info(
-                    "helper download: fetch attempt %d returned a message "
-                    "without a document", attempt + 1)
+                    "helper download: history attempt %d returned no messages",
+                    attempt + 1)
             if attempt < 2:
                 await asyncio.sleep(1.5)
         if helper_msg is None:
             raise DownloadError("helper ko forwarded file nahi mili")
         await user_app.download_media(helper_msg, file_name=local_path)
-        log.info("helper download: primary path downloaded the file")
+        log.info("helper download: history path downloaded the file")
     except Exception as exc:  # noqa: BLE001 - primary path failed, try the fallback
-        # 3. Fallback: the forward already gave the helper access to the
-        # file (it now owns a copy in its DM with the bot), so try
-        # downloading directly by the original document's file_id. The
+        # 3. Fallback: the bot's ORIGINAL file_id reference is expired
+        # for the helper's session (FILE_REFERENCE_EXPIRED — the bot's
+        # file_id can NEVER be used directly by the helper), so the BOT
+        # first re-fetches the original message from the user<->bot DM
+        # to get a FRESH file_id (the "origin context" Telegram asks
+        # for), and the helper downloads by that fresh reference. The
         # caller verifies the result with verify_download, so a bad
         # fallback (0 bytes / wrong size) is caught safely and the user
         # gets a clear download error instead of a misleading verdict.
         log.info(
-            "helper download: primary path failed (%s); trying file_id fallback",
-            type(exc).__name__)
+            "helper download: history path failed (%s); trying fresh "
+            "file_id fallback", type(exc).__name__)
         # Drop any partial file from the failed primary attempt so the
         # fallback starts clean.
         try:
@@ -1270,8 +1305,27 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
                 os.remove(local_path)
         except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
+        fresh_file_id = None
         try:
-            await user_app.download_media(doc.file_id, file_name=local_path)
+            orig = await app.get_messages(message.chat.id, message.id)
+            if isinstance(orig, list):
+                orig = orig[0] if orig else None
+            if orig is not None and getattr(orig, "document", None) is not None:
+                fresh_file_id = getattr(orig.document, "file_id", None)
+        except Exception as re_exc:  # noqa: BLE001
+            log.info(
+                "helper download: original message re-fetch failed (%s)",
+                type(re_exc).__name__)
+        if not fresh_file_id:
+            log.info(
+                "helper download: no fresh file_id from re-fetch; "
+                "raising original error")
+            if isinstance(exc, DownloadError):
+                raise exc
+            raise DownloadError(
+                f"helper se download nahi ho paya ({exc})") from exc
+        try:
+            await user_app.download_media(fresh_file_id, file_name=local_path)
         except Exception as fb_exc:  # noqa: BLE001
             log.info(
                 "helper download: file_id fallback failed (%s)",

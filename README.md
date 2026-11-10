@@ -126,22 +126,30 @@ participant nahi hota, isliye wo file ko seedha file_id se download nahi
 kar sakta — aisa karne par download chupchaap 0 bytes ki aati hai. Isliye
 bot 20 MB se badi file ko pehle helper account (`HELPER_USER_ID`, default
 8657748041 = GHOST) ko **forward** karta hai — ye forwarded message helper
-ke DM me bot ke saath aata hai (helper ke Saved Messages me nahi), isliye
-helper use bot ke chat id se fetch karta hai (runtime me `app.get_me()` se
-liya jata hai, hardcode nahi). Phir helper apni copy se file download karta
-hai, aur baad me forwarded copy usi DM se delete kar deta hai. Fetch 3
-baar retry hota hai (1.5 s gap) kyunki forwarded message helper ke session
-me aane me thoda time lag sakta hai. Iske liye helper account ne bot ko
-`/start` kiya hua hona chahiye (warna bot usko forward nahi kar payega aur
-download error aayega). Agar fetch 3 baar fail ho jaye to bot ek **fallback**
-try karta hai: original document ke file_id se seedha download (forward se
-helper ko file ka access mil chuka hota hai). Har download ke baad size
-verify hoti hai — 0 bytes ya galat size aaye to analysis skip karke clear
-download error milta hai, galat verdict kabhi nahi. Helper download ke
-har step ka **debug log** bhi aata hai (INFO level, Railway logs me):
-bot_user_id, helper_user_id, forwarded msg id, har fetch attempt ka
-result, aur fallback ka result — sirf ids aur exception TYPE log hote
-hain, kabhi koi token/session/key nahi.
+ke DM me bot ke saath aata hai (helper ke Saved Messages me nahi). Phir
+helper us DM ki **recent history** padhta hai (bot ke chat id se, runtime
+me `app.get_me()` se liya jata hai, hardcode nahi) aur sabse recent aisa
+message dhoondhta hai jiska document target file se match kare — pehle
+filename + size dono se, na mile to sabse recent koi bhi document. History
+3 baar retry hoti hai (1.5 s gap) kyunki forwarded message helper ke
+session me aane me thoda time lag sakta hai. Phir helper apni copy se file
+download karta hai, aur baad me forwarded copy usi DM se delete kar deta
+hai. (Purana `get_messages` by id wala rasta hata diya gaya hai — forward
+succeed hone ke baad bhi wo id helper ki nazar me forwarded document ki
+taraf ishara nahi karti thi, isliye fetch har baar "message without a
+document" lautata tha.) Iske liye helper account ne bot ko `/start` kiya
+hua hona chahiye (warna bot usko forward nahi kar payega aur download
+error aayega). Agar history path 3 baar fail ho jaye to bot ek **fallback**
+try karta hai: bot pehle original message ko user↔bot DM se dobara fetch
+karke ek **fresh file_id** leta hai (purana file_id helper ke session ke
+liye expired hota hai — FILE_REFERENCE_EXPIRED), phir helper us fresh
+file_id se download karta hai. Har download ke baad size verify hoti hai —
+0 bytes ya galat size aaye to analysis skip karke clear download error
+milta hai, galat verdict kabhi nahi. Helper download ke har step ka
+**debug log** bhi aata hai (INFO level, Railway logs me): bot_user_id,
+helper_user_id, forwarded msg id, forward result me document hai ya nahi,
+har history attempt ka result, aur fallback ka result — sirf ids aur
+exception TYPE log hote hain, kabhi koi token/session/key nahi.
 
 Session string kaise lein:
 - **Sanji Bot Factory** ke `/userbot` flow se (phone number → OTP → 2FA
