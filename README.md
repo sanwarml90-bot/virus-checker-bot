@@ -137,13 +137,21 @@ download karta hai, aur baad me forwarded copy usi DM se delete kar deta
 hai. (Purana `get_messages` by id wala rasta hata diya gaya hai — forward
 succeed hone ke baad bhi wo id helper ki nazar me forwarded document ki
 taraf ishara nahi karti thi, isliye fetch har baar "message without a
-document" lautata tha.) Iske liye helper account ne bot ko `/start` kiya
+document" lautata tha.) History `Client.get_chat_history` se padhi jati
+hai — ye ek **async generator** hai (`async for` se iterate karo, kabhi
+`await` mat karo, list mat banao). ⚠️ `Client.get_history` Pyrogram 2.x
+me **hai hi nahi** — use call karne par `AttributeError` aata hai, isliye
+use kabhi mat likhna. Iske liye helper account ne bot ko `/start` kiya
 hua hona chahiye (warna bot usko forward nahi kar payega aur download
 error aayega). Agar history path 3 baar fail ho jaye to bot ek **fallback**
-try karta hai: bot pehle original message ko user↔bot DM se dobara fetch
-karke ek **fresh file_id** leta hai (purana file_id helper ke session ke
-liye expired hota hai — FILE_REFERENCE_EXPIRED), phir helper us fresh
-file_id se download karta hai. Har download ke baad size verify hoti hai —
+try karta hai: helper **forward result ke apne document** ka file_id
+(`fwd.document.file_id`) se download karta hai. ⚠️ Bot ka file_id helper
+kabhi use nahi kar sakta — file reference session-bound hota hai, isliye
+bot se mila koi bhi file_id (original ho ya dobara fetch karke fresh liya
+hua) helper ke session me hamesha FILE_REFERENCE_EXPIRED deta hai; purana
+bot re-fetch fallback isiliye poori tarah hata diya gaya hai. Forward
+result ka file_id helper ke session ka hota hai, kyunki forward BOT↔GHOST
+DM me aaya tha. Har download ke baad size verify hoti hai —
 0 bytes ya galat size aaye to analysis skip karke clear download error
 milta hai, galat verdict kabhi nahi. Helper download ke har step ka
 **debug log** bhi aata hai (INFO level, Railway logs me): bot_user_id,
