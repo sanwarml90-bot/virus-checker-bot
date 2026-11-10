@@ -1106,7 +1106,12 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
     (chat = the bot's user id, fetched at runtime via app.get_me()) —
     NOT in the helper's Saved Messages, so the helper must fetch and
     delete it from the bot's chat id. The forwarded copy is deleted from
-    that DM afterwards (best-effort). Raises DownloadError on any failure.
+    that DM afterwards (best-effort). If the fetch path fails, a fallback
+    downloads directly by the original document's file_id (the forward
+    already gave the helper access to the file); the caller verifies the
+    result, so a bad fallback is caught safely. Raises DownloadError on
+    any failure. Debug logging (INFO) records ids and exception TYPES
+    only — never any token, session string, or API key.
     """
     assert user_app is not None
     # The forwarded message will live in the helper's DM with the bot, so
@@ -1120,6 +1125,9 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
         bot_user_id = bot_me.id
     except Exception as exc:  # noqa: BLE001
         raise DownloadError(f"bot ki id nahi mili ({exc})") from exc
+    log.info(
+        "helper download: bot_user_id=%s helper_user_id=%s",
+        bot_user_id, HELPER_USER_ID)
     # 1. Forward the document to the helper account.
     try:
         fwd = await app.forward_messages(
@@ -1134,8 +1142,11 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
         raise DownloadError(
             "helper ko file forward nahi ho payi (koi message nahi mila)")
     fwd_msg_id = fwd.id
+    log.info(
+        "helper download: forwarded msg id=%s (forward result type=%s)",
+        fwd_msg_id, type(fwd).__name__)
     try:
-        # 2. Helper fetches its own copy of the forwarded message and
+        # 2. Primary path: helper fetches the forwarded message and
         # downloads the file from it (its own file reference). Retry a
         # few times — the forwarded message may take a moment to
         # propagate to the helper's session.
@@ -1143,28 +1154,72 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
         for attempt in range(3):
             try:
                 fetched = await user_app.get_messages(bot_user_id, fwd_msg_id)
-            except Exception:  # noqa: BLE001 - retry on transient fetch errors
+            except Exception as exc:  # noqa: BLE001 - retry on transient fetch errors
+                log.info(
+                    "helper download: fetch attempt %d raised %s",
+                    attempt + 1, type(exc).__name__)
                 fetched = None
             if isinstance(fetched, list):
                 fetched = fetched[0] if fetched else None
             if fetched is not None and getattr(fetched, "document", None) is not None:
                 helper_msg = fetched
+                log.info(
+                    "helper download: fetch attempt %d got the document",
+                    attempt + 1)
                 break
+            if fetched is None:
+                log.info(
+                    "helper download: fetch attempt %d returned None",
+                    attempt + 1)
+            else:
+                log.info(
+                    "helper download: fetch attempt %d returned a message "
+                    "without a document", attempt + 1)
             if attempt < 2:
                 await asyncio.sleep(1.5)
         if helper_msg is None:
             raise DownloadError("helper ko forwarded file nahi mili")
         await user_app.download_media(helper_msg, file_name=local_path)
-    except DownloadError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise DownloadError(f"helper se download nahi ho paya ({exc})") from exc
+        log.info("helper download: primary path downloaded the file")
+    except Exception as exc:  # noqa: BLE001 - primary path failed, try the fallback
+        # 3. Fallback: the forward already gave the helper access to the
+        # file (it now owns a copy in its DM with the bot), so try
+        # downloading directly by the original document's file_id. The
+        # caller verifies the result with verify_download, so a bad
+        # fallback (0 bytes / wrong size) is caught safely and the user
+        # gets a clear download error instead of a misleading verdict.
+        log.info(
+            "helper download: primary path failed (%s); trying file_id fallback",
+            type(exc).__name__)
+        # Drop any partial file from the failed primary attempt so the
+        # fallback starts clean.
+        try:
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        try:
+            await user_app.download_media(doc.file_id, file_name=local_path)
+        except Exception as fb_exc:  # noqa: BLE001
+            log.info(
+                "helper download: file_id fallback failed (%s)",
+                type(fb_exc).__name__)
+            if isinstance(exc, DownloadError):
+                raise exc
+            raise DownloadError(
+                f"helper se download nahi ho paya ({exc})") from exc
+        log.info(
+            "helper download: file_id fallback downloaded the file "
+            "(caller will verify the size)")
     finally:
-        # 3. Clean up the forwarded copy from the helper's DM with the bot.
+        # 4. Clean up the forwarded copy from the helper's DM with the bot.
         try:
             await user_app.delete_messages(bot_user_id, fwd_msg_id)
-        except Exception:  # noqa: BLE001 - cleanup must never break the check
-            pass
+            log.info("helper download: forwarded copy deleted")
+        except Exception as exc:  # noqa: BLE001 - cleanup must never break the check
+            log.info(
+                "helper download: cleanup delete failed (%s)",
+                type(exc).__name__)
 
 
 async def _run_single_check(item: dict) -> None:

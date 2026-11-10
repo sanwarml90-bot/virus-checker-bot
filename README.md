@@ -120,7 +120,15 @@ hai, aur baad me forwarded copy usi DM se delete kar deta hai. Fetch 3
 baar retry hota hai (1.5 s gap) kyunki forwarded message helper ke session
 me aane me thoda time lag sakta hai. Iske liye helper account ne bot ko
 `/start` kiya hua hona chahiye (warna bot usko forward nahi kar payega aur
-download error aayega).
+download error aayega). Agar fetch 3 baar fail ho jaye to bot ek **fallback**
+try karta hai: original document ke file_id se seedha download (forward se
+helper ko file ka access mil chuka hota hai). Har download ke baad size
+verify hoti hai — 0 bytes ya galat size aaye to analysis skip karke clear
+download error milta hai, galat verdict kabhi nahi. Helper download ke
+har step ka **debug log** bhi aata hai (INFO level, Railway logs me):
+bot_user_id, helper_user_id, forwarded msg id, har fetch attempt ka
+result, aur fallback ka result — sirf ids aur exception TYPE log hote
+hain, kabhi koi token/session/key nahi.
 
 Session string kaise lein:
 - **Sanji Bot Factory** ke `/userbot` flow se (phone number → OTP → 2FA
