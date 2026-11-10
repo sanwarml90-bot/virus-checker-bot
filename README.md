@@ -11,7 +11,7 @@ live update hota hai). Har tool ki report AI ko di jati hai, aur AI poori
 report padh ke summary + final rating deta hai:
 
 1. **File info** — naam, size, MD5 aur SHA256 hash
-2. **Static analysis (androguard)** — package name, app name, version,
+2. **Static analysis (androguard, LIGHT)** — package name, app name, version,
    min/target SDK, poori permission list (dangerous permissions flag hoti hain
    jaise `SEND_SMS`, `READ_CONTACTS`, `RECORD_AUDIO`, `CAMERA`,
    `ACCESS_FINE_LOCATION`, `REQUEST_INSTALL_PACKAGES`, `BIND_DEVICE_ADMIN`,
@@ -19,7 +19,14 @@ report padh ke summary + final rating deta hai:
    APK ke andar hard-coded **URLs/domains** (shortener, raw IP aur non-HTTPS
    URLs flag hote hain), **suspicious API calls** (DexClassLoader, reflection,
    SmsManager, Runtime.exec, crypto) aur flags — debuggable, allowBackup,
-   install-packages, device-admin
+   install-packages, device-admin. Light isliye: bot `APK(path)` se sirf
+   manifest padhta hai aur har `classes*.dex` ki **string table** se URLs/calls
+   nikalta hai (`DEX(data)` + `get_strings()`); `AnalyzeAPK` kabhi use nahi
+   hota, kyunki wo poori method-level analysis karta hai aur badi APK (113 MB
+   Telegram jaisi, hazaaron classes) pe ghanton atak jata hai. androguard ka
+   DEBUG logging band hai (level WARNING), warna Railway ke logs bhar jate
+   hain. **Har step pe 5 minute ka timeout** hai — Step 2 time pe poora na ho
+   to "fail" mark karke scan Step 3 se aage badhta hai, kabhi atak ta nahi.
 3. **APKiD** — packer, compiler, obfuscator aur anti-analysis tricks
    (anti-vm / anti-disassembly / anti-debug) detect karta hai. Ye step
    local hai, koi API key nahi chahiye. Agar APKiD install nahi hai ya fail

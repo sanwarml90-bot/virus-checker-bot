@@ -61,6 +61,11 @@ from pyrogram.types import (CallbackQuery, InlineKeyboardButton,
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("virus-checker-bot")
+# androguard logs at DEBUG by default and floods Railway (>500 lines/sec
+# on a big APK, hundreds of thousands of dropped lines). Silence it to
+# WARNING — our own INFO logs are all the diagnosis we need. Also set
+# defensively inside analyze_apk_static in case this is reset.
+logging.getLogger("androguard").setLevel(logging.WARNING)
 
 API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = os.environ.get("API_HASH", "")
@@ -289,10 +294,28 @@ def _flag_url(url: str) -> str:
     return ""
 
 
+def _manifest_app_element(apk):
+    """The <application> element of the parsed manifest, or None."""
+    try:
+        get_xml = getattr(apk, "get_android_manifest_xml", None)
+        if callable(get_xml):
+            xml = get_xml()
+            if xml is not None:
+                return xml.find("application")
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _get_allow_backup(apk) -> bool | None:
     """True if the manifest allows backup, False if it forbids it, None if unknown."""
     try:
-        app_elem = apk.get_application()
+        app_elem = _manifest_app_element(apk)
+        if app_elem is None:
+            # androguard 3.x fallback: get_application() returns the element.
+            get_app = getattr(apk, "get_application", None)
+            if callable(get_app):
+                app_elem = get_app()
         if app_elem is None:
             return None
         ns = "{http://schemas.android.com/apk/res/android}"
@@ -305,19 +328,78 @@ def _get_allow_backup(apk) -> bool | None:
         return None
 
 
+def _is_debuggable(apk) -> bool:
+    """True if the manifest marks the app debuggable, else False."""
+    try:
+        is_dbg = getattr(apk, "is_debuggable", None)
+        if callable(is_dbg):
+            return bool(is_dbg())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        app_elem = _manifest_app_element(apk)
+        if app_elem is not None:
+            ns = "{http://schemas.android.com/apk/res/android}"
+            val = app_elem.get(ns + "debuggable")
+            if val is not None:
+                return str(val).strip().lower() in ("true", "1")
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _apk_get(apk, names) -> object:
+    """Call the first existing getter in `names`, return its value or None.
+
+    androguard renamed getters between 3.x and 4.x (e.g. get_version_name
+    -> get_androidversion_name); try each name in order.
+    """
+    for name in names:
+        fn = getattr(apk, name, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:  # noqa: BLE001 - one bad getter must not kill the step
+                continue
+    return None
+
+
 def analyze_apk_static(path: str) -> dict:
-    """Expanded static analysis with androguard. Raises on parse failure.
+    """Light static analysis with androguard. Raises on parse failure.
+
+    Uses APK(path) for manifest info plus DEX(data) for the string table
+    only — NEVER AnalyzeAPK, which does FULL method-level analysis (every
+    class, every method, every basic block) and hangs for hours on a big
+    APK (tens of thousands of classes) while flooding the logs at DEBUG.
+    APK() parses only the manifest/resources; DEX(data) parses only the
+    DEX string table. The analysis object AnalyzeAPK returns is discarded
+    by this bot anyway, so nothing is lost.
 
     Returns package/version/SDK info, permissions, component counts, plus
     hard-coded URLs (with suspicious ones flagged), suspicious API calls
     found in DEX strings, and flags for debuggable / allowBackup /
     install-packages / device-admin.
     """
-    from androguard.misc import AnalyzeAPK
-    apk, dex_list, _analysis = AnalyzeAPK(path)
+    # Silence androguard defensively (module level already sets it).
+    logging.getLogger("androguard").setLevel(logging.WARNING)
+    from androguard.core.apk import APK
+    from androguard.core.dex import DEX
+
+    apk = APK(path)
     perms = list(apk.get_permissions() or [])
 
-    # DEX strings -> URLs + suspicious API calls.
+    # DEX strings -> URLs + suspicious API calls. get_all_dex() yields the
+    # raw bytes of every classes*.dex; DEX(data) parses the string table
+    # only (no method analysis).
+    dex_list = []
+    try:
+        for data in apk.get_all_dex():
+            try:
+                dex_list.append(DEX(data))
+            except Exception:  # noqa: BLE001 - one bad DEX must not kill the step
+                continue
+    except Exception:  # noqa: BLE001
+        pass
     strings = _dex_strings(dex_list)
     blob = "\n".join(strings)
     urls: list[str] = []
@@ -340,11 +422,8 @@ def analyze_apk_static(path: str) -> dict:
 
     # Flags.
     flags: list[str] = []
-    try:
-        if apk.is_debuggable():
-            flags.append("debuggable")
-    except Exception:  # noqa: BLE001
-        pass
+    if _is_debuggable(apk):
+        flags.append("debuggable")
     allow_backup = _get_allow_backup(apk)
     if allow_backup is True:
         flags.append("allowBackup")
@@ -353,11 +432,13 @@ def analyze_apk_static(path: str) -> dict:
     if "android.permission.BIND_DEVICE_ADMIN" in perms:
         flags.append("device-admin")
 
+    version_name = _apk_get(apk, ("get_androidversion_name", "get_version_name"))
+    version_code = _apk_get(apk, ("get_androidversion_code", "get_version_code"))
     return {
         "package": apk.get_package() or "unknown",
         "app_name": apk.get_app_name() or "unknown",
-        "version_name": apk.get_version_name() or "unknown",
-        "version_code": str(apk.get_version_code() or "unknown"),
+        "version_name": version_name or "unknown",
+        "version_code": str(version_code or "unknown"),
         "min_sdk": str(apk.get_min_sdk_version() or "unknown"),
         "target_sdk": str(apk.get_target_sdk_version() or "unknown"),
         "permissions": perms,
@@ -1430,13 +1511,22 @@ async def _run_single_check(item: dict) -> None:
             md5, sha256 = "unknown", "unknown"
         await update(0, "done")
 
-        # Step 2 — expanded static analysis (androguard).
+        # Step 2 — expanded static analysis (androguard). 5-minute cap:
+        # a step must NEVER hang the scan forever (a big APK used to
+        # stall here for hours). On timeout the step is marked "fail"
+        # and the scan continues to Step 3.
         static: dict | None = None
         static_error = ""
         await update(1, "doing")
         try:
-            static = await asyncio.to_thread(analyze_apk_static, local_path)
+            static = await asyncio.wait_for(
+                asyncio.to_thread(analyze_apk_static, local_path), timeout=300)
             await update(1, "done")
+        except asyncio.TimeoutError:
+            static_error = ("Static analysis timeout (5 min) — badi APK, "
+                            "is step ko skip kiya")
+            log.warning("androguard timed out after 5 min for %s", filename)
+            await update(1, "fail")
         except Exception as exc:  # noqa: BLE001
             static_error = str(exc)[:200]
             log.warning("androguard failed: %s", exc)
