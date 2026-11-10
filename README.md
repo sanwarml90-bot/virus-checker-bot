@@ -41,6 +41,19 @@ summary, har tool ki ek line, aur sabse aakhir me **FINAL RATING (X/10 —
 LEVEL)** bold me. Check ke baad download ki hui APK file delete kar di
 jati hai.
 
+## Commands aur buttons
+
+- **/start** — welcome message + inline keyboard: 📤 Scan APK, 🛡️ Safety
+  Guide, ℹ️ About, 📊 Status
+- **/help** — kaise use karein (scan, batch, limits)
+- **/id** — tumhara Telegram ID
+- **/status** — bot Online hai ya nahi, abhi kitne scans queued/running hain
+  (saare users mila ke), aur VirusTotal configured hai ya nahi (key kabhi
+  dikhai nahi jati)
+- **Buttons:** Scan APK → APK bhejne ka tarika batata hai; Safety Guide →
+  chhota safety guide; About → bot kya check karta hai; Status → alert me
+  active/queued scan count
+
 ## Batch scan — ek saath kai APK
 
 Ek ke baad ek kai APK bhej do — wo **queue** me lag jayenge aur ek-ek karke

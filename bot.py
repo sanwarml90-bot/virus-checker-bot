@@ -56,7 +56,8 @@ import tempfile
 
 import requests
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import (CallbackQuery, InlineKeyboardButton,
+                            InlineKeyboardMarkup, Message)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("virus-checker-bot")
@@ -927,6 +928,16 @@ def _progress_text(states: list[str], seq: int) -> str:
 
 
 # ---------------------------------------------------------------- commands
+def main_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard shown under /start."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Scan APK", callback_data="scan_help")],
+        [InlineKeyboardButton("🛡️ Safety Guide", callback_data="safety"),
+         InlineKeyboardButton("ℹ️ About", callback_data="about")],
+        [InlineKeyboardButton("📊 Status", callback_data="status")],
+    ])
+
+
 @app.on_message(filters.command("start") & filters.private)
 async def cmd_start(client: Client, message: Message):
     await message.reply_text(
@@ -945,7 +956,8 @@ async def cmd_start(client: Client, message: Message):
         "⚠️ Limit: file 300 MB tak ki ho sakti hai. 20 MB tak ki file bot khud "
         "download karta hai; 20 MB se badi file (300 MB tak) helper se download "
         "hoti hai.\n"
-        "Bas APK file bhej do — baaki sab main kar lunga. 😎"
+        "Bas APK file bhej do — baaki sab main kar lunga. 😎",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -966,6 +978,66 @@ async def cmd_help(client: Client, message: Message):
         "hoti hai — agar helper set nahi hai to 20 MB se badi file ka check nahi hoga.\n"
         "📌 Check ke baad file mere server se delete kar di jati hai."
     )
+
+
+@app.on_message(filters.command("id") & filters.private)
+async def cmd_id(client: Client, message: Message):
+    await message.reply_text(
+        f"Your Telegram ID:\n`{message.from_user.id}`"
+    )
+
+
+def _active_scan_count() -> int:
+    """Total APKs currently queued or running, across all users."""
+    return sum(uq.get("pending", 0) for uq in _user_queues.values())
+
+
+@app.on_message(filters.command("status") & filters.private)
+async def cmd_status(client: Client, message: Message):
+    vt = "Configured ✅" if VIRUSTOTAL_API_KEY else "Not set — VirusTotal step skip hota hai"
+    await message.reply_text(
+        "🟢 **Bot Online**\n\n"
+        f"Active/queued scans: {_active_scan_count()}\n"
+        f"VirusTotal: {vt}"
+    )
+
+
+@app.on_callback_query()
+async def on_callback_query(client: Client, query: CallbackQuery):
+    data = query.data or ""
+    if data == "scan_help":
+        await query.answer()
+        await query.message.reply_text(
+            "📤 APK file ko yahan send karo.\n\n"
+            "Ek saath 5 tak APK bhej sakte ho — wo queue me lag kar ek-ek karke "
+            "scan honge (App 1, App 2…). Har file 300 MB tak ki ho sakti hai."
+        )
+    elif data == "safety":
+        await query.answer()
+        await query.message.reply_text(
+            "⚠️ **Safety Guide**\n\n"
+            "• Unknown source se APK install na karein.\n"
+            "• Scan report ko final guarantee na samjhein — no detections ka "
+            "matlab 100% safe nahi hota.\n"
+            "• App ki permissions install karne se pehle check karein.\n"
+            "• Important data ka backup rakhein."
+        )
+    elif data == "about":
+        await query.answer()
+        await query.message.reply_text(
+            "🛡️ **APK Virus Checker**\n\n"
+            "Har APK ka full check: file info + hashes, static analysis "
+            "(permissions, URLs, suspicious calls), APKiD (packer/obfuscator), "
+            "VirusTotal scan, aur AI summary + final rating (0-10).\n\n"
+            "📦 Batch: ek saath 5 tak APK, 300 MB tak ki file."
+        )
+    elif data == "status":
+        await query.answer(
+            f"Active/queued scans: {_active_scan_count()}",
+            show_alert=True,
+        )
+    else:
+        await query.answer()
 
 
 # ---------------------------------------------------------------- batch queue (per user)
@@ -1435,7 +1507,7 @@ def _build_report(f: dict, assessment: dict, seq: int, ai_note: str) -> str:
     return report
 
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "help", "id", "status"]))
 async def on_private_text(client: Client, message: Message):
     await message.reply_text(
         "Mujhe koi **.apk file** bhejo, main use virus scan karke report dunga. 🔍\n"
