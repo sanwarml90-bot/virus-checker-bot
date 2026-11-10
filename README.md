@@ -112,11 +112,15 @@ login, bot token nahi.
 participant nahi hota, isliye wo file ko seedha file_id se download nahi
 kar sakta — aisa karne par download chupchaap 0 bytes ki aati hai. Isliye
 bot 20 MB se badi file ko pehle helper account (`HELPER_USER_ID`, default
-8657748041 = GHOST) ko **forward** karta hai (uske Saved Messages me),
-phir helper apni copy se file download karta hai, aur baad me forwarded
-copy delete kar deta hai. Iske liye helper account ne bot ko `/start` kiya
-hua hona chahiye (warna bot usko forward nahi kar payega aur download
-error aayega).
+8657748041 = GHOST) ko **forward** karta hai — ye forwarded message helper
+ke DM me bot ke saath aata hai (helper ke Saved Messages me nahi), isliye
+helper use bot ke chat id se fetch karta hai (runtime me `app.get_me()` se
+liya jata hai, hardcode nahi). Phir helper apni copy se file download karta
+hai, aur baad me forwarded copy usi DM se delete kar deta hai. Fetch 3
+baar retry hota hai (1.5 s gap) kyunki forwarded message helper ke session
+me aane me thoda time lag sakta hai. Iske liye helper account ne bot ko
+`/start` kiya hua hona chahiye (warna bot usko forward nahi kar payega aur
+download error aayega).
 
 Session string kaise lein:
 - **Sanji Bot Factory** ke `/userbot` flow se (phone number → OTP → 2FA

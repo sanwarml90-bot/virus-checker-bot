@@ -1100,13 +1100,26 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
     The helper is NOT a participant in the user<->bot DM, so it cannot
     download the file by file_id directly — that silently yields 0 bytes.
     The bot therefore first forwards the document to the helper account
-    (HELPER_USER_ID, i.e. its Saved Messages), so the helper owns the
-    message; then the helper fetches its own copy of the forwarded message
-    and downloads the file from it. The forwarded copy is deleted from the
-    helper's Saved Messages afterwards (best-effort). Raises DownloadError
-    on any failure.
+    (HELPER_USER_ID), so the helper owns the message; then the helper
+    fetches its own copy of the forwarded message and downloads the file
+    from it. The forwarded message lives in the helper's DM with the BOT
+    (chat = the bot's user id, fetched at runtime via app.get_me()) —
+    NOT in the helper's Saved Messages, so the helper must fetch and
+    delete it from the bot's chat id. The forwarded copy is deleted from
+    that DM afterwards (best-effort). Raises DownloadError on any failure.
     """
     assert user_app is not None
+    # The forwarded message will live in the helper's DM with the bot, so
+    # the helper must fetch/delete it from the chat with the bot (the
+    # bot's user id) — NOT from the helper's own id, which for the helper
+    # client is its Saved Messages. Get the bot id at runtime; never
+    # hardcode it. Fetch it before forwarding so a failure here leaves
+    # no orphaned forwarded message behind.
+    try:
+        bot_me = await app.get_me()
+        bot_user_id = bot_me.id
+    except Exception as exc:  # noqa: BLE001
+        raise DownloadError(f"bot ki id nahi mili ({exc})") from exc
     # 1. Forward the document to the helper account.
     try:
         fwd = await app.forward_messages(
@@ -1123,11 +1136,23 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
     fwd_msg_id = fwd.id
     try:
         # 2. Helper fetches its own copy of the forwarded message and
-        # downloads the file from it (its own file reference).
-        helper_msg = await user_app.get_messages(HELPER_USER_ID, fwd_msg_id)
-        if isinstance(helper_msg, list):
-            helper_msg = helper_msg[0] if helper_msg else None
-        if helper_msg is None or getattr(helper_msg, "document", None) is None:
+        # downloads the file from it (its own file reference). Retry a
+        # few times — the forwarded message may take a moment to
+        # propagate to the helper's session.
+        helper_msg = None
+        for attempt in range(3):
+            try:
+                fetched = await user_app.get_messages(bot_user_id, fwd_msg_id)
+            except Exception:  # noqa: BLE001 - retry on transient fetch errors
+                fetched = None
+            if isinstance(fetched, list):
+                fetched = fetched[0] if fetched else None
+            if fetched is not None and getattr(fetched, "document", None) is not None:
+                helper_msg = fetched
+                break
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+        if helper_msg is None:
             raise DownloadError("helper ko forwarded file nahi mili")
         await user_app.download_media(helper_msg, file_name=local_path)
     except DownloadError:
@@ -1135,9 +1160,9 @@ async def _download_via_helper(message: Message, doc, local_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         raise DownloadError(f"helper se download nahi ho paya ({exc})") from exc
     finally:
-        # 3. Clean up the forwarded copy from the helper's Saved Messages.
+        # 3. Clean up the forwarded copy from the helper's DM with the bot.
         try:
-            await user_app.delete_messages(HELPER_USER_ID, fwd_msg_id)
+            await user_app.delete_messages(bot_user_id, fwd_msg_id)
         except Exception:  # noqa: BLE001 - cleanup must never break the check
             pass
 
